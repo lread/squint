@@ -10,7 +10,6 @@
    [squint.repl.node :as repl]
    #_[squint.repl.nrepl-server :as nrepl]
    [squint.internal.node.utils :as utils]
-   [clojure.set :as cset]
    [clojure.string :as str])
   (:require-macros [squint.resource :refer [version]]))
 
@@ -188,12 +187,9 @@
                     :extra-desc ["- use keyword to match files with extension"
                                  "- otherwise matches files by regex"]
                     :ref "<resource>"
-                    :coerce [:string]
-                    :collect (fn [coll arg-value]
-                               (conj (or coll #{})
-                                     (if (str/starts-with? arg-value ":")
-                                       (cli/coerce arg-value :keyword)
-                                       (cli/coerce arg-value :string))))
+                    :coerce #{(fn [x] (if (str/starts-with? x ":")
+                                        (cli/coerce x :keyword)
+                                        (cli/coerce x :string)))}
                     :example-values [:json "'.*/images/.*\\\\.png'"]}
    :output-dir     {:desc "Base output directory for JS files"
                     :ref "<dir>"
@@ -280,13 +276,15 @@
     (str "\u001B[31m" text "\u001B[0m")))
 
 (defn make-error-fn [cmd-usage-help]
-  (fn [{:keys [type cause msg option value] :as data}]
+  (fn [{:keys [type cause msg option] :as data}]
     (if-let [error-msg (case type
                          :org.babashka/cli (cond
                                              (= :require cause)
                                              (str "Missing required option: " (kw-opt->cli-opt option))
                                              ;; Override default of: Coerce failure: "cannot transform (implicit) true to string"
-                                             (and (= :coerce cause) (= "true" value))
+                                             ;; TODO: try to find less brittle way to do this
+                                             (and (= :coerce cause)
+                                                  (str/includes? msg "cannot transform (implicit) true"))
                                              (str "Option specified without value: " (kw-opt->cli-opt option))
                                              ;; Override default: Report unknown option in cmdline syntax, not as keyword
                                              (= :restrict cause)
@@ -440,22 +438,19 @@ Use squint <subcommand> --help to show more info."))))
   (let [{:keys [cmd]} (parse-cmd-opts-args cli-args)]
     (cmd-def-from-cmd cmd-table cmd)))
 
-(defn spec-opt-key [spec op spec-key]
-  (let [defer-spec-key (keyword (str "deferred-" (name spec-key)))]
-    (reduce-kv (fn [m k v]
-                 (assoc m k (cset/rename-keys v (case op
-                                                  :defer {spec-key defer-spec-key}
-                                                  :enable {defer-spec-key spec-key}))))
-               {}
-               spec)))
-
-(defn apply-opt-defaults [spec opts]
-  (reduce-kv (fn [opts spec-key {:keys [default]}]
-               (if (and default (nil? (spec-key opts)))
-                 (assoc opts spec-key default)
-                 opts))
-             opts
-             spec))
+(defn- user-default-opts
+  "Return default user opts relevant to current command"
+  [{:keys [squint-edn? spec] :as cmd-def}]
+  (when squint-edn?
+    (let [opts (->> (select-keys (utils/get-cfg) (keys spec))
+                    ;; bb cli only coerces strings, so convert values to strings
+                    (reduce-kv (fn [m k v]
+                                 (assoc m k
+                                        (if (coll? v)
+                                          (mapv str v)
+                                          (str v))))
+                               {}))]
+      (cli/coerce-opts opts cmd-def))))
 
 (defn init []
   (let [cli-args (.slice js/process.argv 2)]
@@ -465,7 +460,6 @@ Use squint <subcommand> --help to show more info."))))
                               (let [usage-help (cmd-usage-help d)]
                                 (assoc d
                                        :spec (-> spec
-                                                 (spec-opt-key :defer :default)
                                                  (assoc :help {:alias :h}))
                                        :usage-help usage-help
                                        :error-fn (make-error-fn usage-help)
@@ -477,18 +471,8 @@ Use squint <subcommand> --help to show more info."))))
         (if-let [help (cmd-help-requested cmd-table cli-args)]
           (println help)
           (let [cmd-def (cmd-def-from-cli-args cmd-table cli-args)
-                cmd-opts-args (parse-cmd-opts-args cli-args cmd-def)
-                squint-edn? (:squint-edn? cmd-def)
-                merged-cmd-opts-args (if-not squint-edn?
-                                       cmd-opts-args
-                                       (assoc cmd-opts-args
-                                              :opts (utils/process-opts! (:opts cmd-opts-args))))
-                ;; we separate options defaults from parsing because options can come
-                ;; from 2 sources: command-line and squint.edn
-                cmd-def (update cmd-def :spec #(spec-opt-key % :enable :default))
-                merged-cmd-opts-args (assoc cmd-opts-args
-                                            :opts (apply-opt-defaults (:spec cmd-def)
-                                                                      (:opts merged-cmd-opts-args)))]
+                default-opts (user-default-opts cmd-def)
+                cmd-opts-args (parse-cmd-opts-args cli-args (assoc cmd-def :exec-args default-opts))]
             (when (:arg-count cmd-def)
-              (args-validate (merge cmd-def merged-cmd-opts-args)))
-            ((:fn cmd-def) merged-cmd-opts-args)))))))
+              (args-validate (merge cmd-def cmd-opts-args)))
+            ((:fn cmd-def) cmd-opts-args)))))))

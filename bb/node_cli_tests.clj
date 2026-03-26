@@ -92,7 +92,27 @@
   (squint-edn {:paths ["src" "src-other"
                        "resources"]
                :output-dir "lib"
-               :copy-resources #{"foo\\.json"  "test\\.json" :css}})
+               :copy-resources #{"foo.json"  "test.json" :css}})
+  (let [{:keys [exit out]} (squint "compile")]
+    (is (= 0 exit))
+    (doseq [s ["Compiled sources: 5"
+               "Copied resources: 3"]]
+      (is (str/includes? out s)))
+    (doseq [f ["lib/foo.json"
+               "lib/baz.css"
+               "lib/main.mjs"]]
+      (is (fs/exists? (str (fs/file test-dir f)))))
+    (is (not (fs/exists? (str (fs/file test-dir "lib/bar.json")))))))
+
+(deftest squint-edn-only-with-coercion-test
+  (fs/copy-tree "test-project" test-dir)
+  (fs/delete-tree (fs/file test-dir "lib"))
+  (squint-edn {:paths ["src" "src-other"
+                       "resources"]
+               ;; specify lib as symbol
+               :output-dir 'lib
+               ;; specify vector instead of set, include duplicate items, and specify keyword as string
+               :copy-resources ["foo.json"  "test.json" "test.json" ":css"]})
   (let [{:keys [exit out]} (squint "compile")]
     (is (= 0 exit))
     (doseq [s ["Compiled sources: 5"
